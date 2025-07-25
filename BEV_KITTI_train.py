@@ -30,6 +30,7 @@ from gen_BEV.utils import gps2distance
 import time
 from op_flow.loss_fun import sequence_loss, fetch_optimizer,corr_test_loss,loss_fun
 from RANSAC_lib.RANSAC import RANSAC
+from utils.wandb_logger import WandbLogger
 
 
 try:
@@ -96,13 +97,14 @@ def match(mask, rot, tran_x, tran_y, coords0):
     coords1 = torch.cat(coords1,dim=0)
     return coords1
 
-    
 
-def train(net, lr, args, save_path):
+def train(net, lr, args, save_path, wandb_logger):
     bestRankResult = 0.0  # current best, Siam-FCANET18
     # loop over the dataset multiple times
     print(args.resume)
     print(args.epochs)
+    wandb_features = dict()
+
     optimizer, scheduler = fetch_optimizer(args, net)
     if not os.path.exists(save_path):
             os.makedirs(save_path)
@@ -211,7 +213,6 @@ def train(net, lr, args, save_path):
                     coe_shift_lat=10, coe_shift_lon=10, coe_theta=10)
                 
                 print(flow_loss.data,"   ", dis_loss.data )
-                
 
             scaler.scale(loss).backward()
             scaler.unscale_(optimizer)  
@@ -273,6 +274,9 @@ def train(net, lr, args, save_path):
                 f.close()
                 loss_vec_10 = []
                 print(metrics)
+
+            wandb_features['train/loss'] = np.round(loss.item(), decimals=4)
+            wandb_logger.log_evaluate(wandb_features)
 
         compNum = epoch % 100
         if not os.path.exists(save_path):
@@ -356,6 +360,8 @@ def parse_args():
     parser.add_argument('--iters', type=int, default=12)
     parser.add_argument('--gamma', type=int, default=0.8)
     parser.add_argument('--clip', type=float, default=1.0)
+
+    parser.add_argument('--wandb', '-wb', action='store_true', help='Turn on wandb log')
     
     args = parser.parse_args()
 
@@ -363,7 +369,7 @@ def parse_args():
 
 
 def getSavePath(args):
-    save_path = './ModelsKitti/KITTI/geometry_opflow'\
+    save_path = '/ws/LTdata/geometry_opflow/KITTI'\
                 + '/lat' + str(args.shift_range_lat) + 'm_lon' + str(args.shift_range_lon) + 'm_rot' + str(
         args.rotation_range)
 
@@ -382,6 +388,15 @@ if __name__ == '__main__':
     save_path = getSavePath(args)
     if not os.path.exists(save_path):
             os.makedirs(save_path)
+
+    if args.wandb:
+        save = save_path.split('/')[3:]
+        save = '/'.join(save)
+        wandb_config = dict(project="360_cvgl", entity='jayhi-park', name=save)
+        wandb_logger = WandbLogger(wandb_config, args)
+    else:
+        wandb_logger = WandbLogger(None)
+    wandb_logger.before_run()
 
     net = eval("BEV_corr")(args)
     if args.dpp:
@@ -420,4 +435,4 @@ if __name__ == '__main__':
 
         lr = args.lr
 
-        train(net, lr, args, save_path)
+        train(net, lr, args, save_path, wandb_logger)

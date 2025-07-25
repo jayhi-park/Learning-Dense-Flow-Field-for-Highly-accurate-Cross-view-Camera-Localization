@@ -676,7 +676,7 @@ def parse_args():
 
 
 def getSavePath(args):
-    save_path = './ModelsKitti/KITTI/geometry_opflow'\
+    save_path = '/ws/LTdata/geometry_opflow/KITTI'\
                 + '/lat' + str(args.shift_range_lat) + 'm_lon' + str(args.shift_range_lon) + 'm_rot' + str(
         args.rotation_range)
 
