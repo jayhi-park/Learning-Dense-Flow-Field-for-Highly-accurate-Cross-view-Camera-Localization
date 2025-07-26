@@ -98,8 +98,8 @@ class RAFT(nn.Module):
         # pcl_features_to_RGB([nn.Upsample(scale_factor=8, mode='nearest')(fmap2)], 0, "result_visualize/PCA/sat_refine.jpg")
         # # show_feature_map(fmap1[0], "result_visualize/flow/BEV_channel/")
         # # show_feature_map(fmap2[0], "result_visualize/flow/sat_channel/")
-        result = torch.cat((fmap1, fmap2), dim=3)
-        pcl_features_to_RGB([nn.Upsample(scale_factor=8, mode='nearest')(result)], 0, "result_visualize/")
+        # result = torch.cat((fmap1, fmap2), dim=3)
+        # pcl_features_to_RGB([nn.Upsample(scale_factor=8, mode='nearest')(result)], 0, "result_visualize/")
         if self.args.alternate_corr:
             corr_fn = AlternateCorrBlock(fmap1, fmap2, radius=self.args.corr_radius)
         else:

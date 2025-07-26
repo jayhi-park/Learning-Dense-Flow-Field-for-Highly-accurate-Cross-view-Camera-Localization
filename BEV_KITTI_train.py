@@ -32,6 +32,7 @@ from op_flow.loss_fun import sequence_loss, fetch_optimizer,corr_test_loss,loss_
 from RANSAC_lib.RANSAC import RANSAC
 from utils.wandb_logger import WandbLogger
 from tqdm import tqdm
+from RANSAC_lib.euclidean_trans import Least_Squares_weight, rt2edu_matrix, Least_Squares
 
 try:
     from torch.cuda.amp import GradScaler
@@ -96,6 +97,502 @@ def match(mask, rot, tran_x, tran_y, coords0):
     
     coords1 = torch.cat(coords1,dim=0)
     return coords1
+
+def coords_grid(batch, ht, wd, device):#[B,2,H, W]
+    coords = torch.meshgrid(torch.arange(ht, device=device), torch.arange(wd, device=device))
+    coords = torch.stack(coords[::-1], dim=0).float()
+    return coords[None].repeat(batch, 1, 1, 1)
+
+def test1(net_test, args, save_path, best_rank_result, epoch, wandb_logger):
+    ### net evaluation state
+    net_test.eval()
+
+    dataloader = load_test1_data(mini_batch, args.shift_range_lat, args.shift_range_lon, args.rotation_range)
+
+    pred_shifts = []
+    pred_headings = []
+
+    gt_shifts = []
+    gt_headings = []
+    wandb_features = dict()
+
+    # RANSAC_E = RANSAC(0.5)
+    # 'epe', '5px', '15px', '25px', '50px'
+    test_met = [0, 0, 0, 0, 0]
+
+    start_time = time.time()
+    # RANSAC_E = RANSAC(0.5)
+    for i, data in enumerate(tqdm(dataloader), 0):
+        sat_map_gt, sat_map, left_camera_k, grd_left_imgs, gt_shift_u, gt_shift_v, gt_heading, gt_depth = [item.cuda()
+                                                                                                           for item
+                                                                                                           in data[:-1]]
+
+        vis_heading = gt_heading * args.rotation_range
+        vis_u = -gt_shift_u * (args.shift_range_lon / utils.get_meter_per_pixel(scale=1))
+        vis_v = -gt_shift_v * (args.shift_range_lat / utils.get_meter_per_pixel(scale=1))
+        s_gt_u = gt_shift_u * args.shift_range_lon
+        s_gt_v = gt_shift_v * args.shift_range_lat
+        s_gt_heading = gt_heading * args.rotation_range
+
+        if args.end2end == 0:
+            flow_predictions, flow_conf, mask = net(sat_map, grd_left_imgs, left_camera_k, gt_shift_u, gt_shift_v,
+                                                    gt_heading, end2end=0)
+            # mask
+            mask = mask.float()
+            mask = F.interpolate(mask, size=(512, 512), mode='bilinear', align_corners=True)
+            mask = mask.bool()
+
+            coords0 = coords_grid(mask.size()[0], mask.size()[2], mask.size()[3], device=mask.device)
+            # coords_gt = match(mask, vis_heading, vis_u, vis_v, coords0)
+
+            # save_img(grd_left_imgs[0], 'result_visualize/grd_ori.jpg')
+            # save_img(sat_map_gt[0], 'result_visualize/sat_ori.jpg')
+            # save_img(sat_map[0], 'result_visualize/sat_noise.jpg')
+            # # grd_solve('result_visualize/sat_ori.jpg', 'result_visualize/grd_ori.jpg', left_camera_k[0:1,:,:].cpu(),'result_visualize/Conf/')
+            # # show_feature_map(flow_conf[-1][0], 'result_visualize/Conf/')
+            # # overly('result_visualize/Conf/BEV.jpg', 'result_visualize/Conf/0.jpg', 'result_visualize/Conf/')
+            # # gt
+            # coords0_gt = coords0[0].permute(1,2,0)
+            # coords1_gt = (coords_gt[0]).permute(1,2,0)
+            # match_x = []
+            # match_y = []
+            # # x = [256, 256+512-vis_u.data.float().cpu()]
+            # # y = [256, 256+vis_v.data.float().cpu()]
+            # # match_x.append(x)
+            # # match_y.append(y)
+            # for h in range(coords0_gt.size()[0]):
+            #     for w in range(coords1_gt.size()[1]):
+            #         if ((h == 270 and w == 340) or \
+            #             (random.randint(0,8000) == 1)) and mask[0,0,h,w]:
+            #             x = [coords0_gt[h][w][0].data.float().cpu(), coords1_gt[h][w][0].data.float().cpu() + coords1_gt.size()[1]]
+            #             y = [coords0_gt[h][w][1].data.float().cpu(), coords1_gt[h][w][1].data.float().cpu()]
+            #             match_x.append(x)
+            #             match_y.append(y)
+            # line_point('result_visualize/sat_ori.jpg', 'result_visualize/sat_noise.jpg', match_x, match_y,None, 'line_gt.jpg')
+
+            coor_points = coords0 + flow_predictions[-1]
+            # mask
+            ptsA = coords0.permute(0, 2, 3, 1)[mask.permute(0, 2, 3, 1).repeat(1, 1, 1, 2)].view(1, -1, 2).detach()
+            ptsB = coor_points.permute(0, 2, 3, 1)[mask.permute(0, 2, 3, 1).repeat(1, 1, 1, 2)].view(1, -1, 2).detach()
+            # ptsB = coords_gt.permute(0,2,3,1)[mask.permute(0,2,3,1).repeat(1,1,1,2)].view(1, -1, 2).detach()
+
+            B, C, H, W = coords0.size()
+            _, _, sat_H, sat_W = sat_map_gt.size()
+            # flow_conf = torch.ones_like(ptsA, device=ptsA.device)
+            ls_weight = Least_Squares_weight(epoch).to(ptsA.device)
+            pre_theta1, pre_u1, pre_v1 = ls_weight(ptsA, ptsB, flow_conf[-1][mask][None, :, None])
+            # pre_theta1, pre_u1, pre_v1 = Least_Squares_weight(ptsA, ptsB, flow_conf[-1][mask][None, :, None])
+            # pre_theta1, pre_u1, pre_v1 = Least_Squares_weight(ptsA, ptsB, flow_conf)
+            edu_matrix = rt2edu_matrix(pre_theta1, pre_u1, pre_v1)
+            R = edu_matrix * torch.tensor([[[1, 1, 0], [1, 1, 0], [0, 0, 1]]], device=mask.device)
+            rol_center = torch.tensor([[[1, 0, -sat_H / 2], [0, 1, -sat_W / 2], [0, 0, 1]]], device=mask.device).repeat(
+                B, 1, 1)
+            T1 = torch.inverse(rol_center) @ torch.inverse(R) @ rol_center @ edu_matrix
+            pre_theta = -pre_theta1 / 3.14 * 180
+            pre_u = T1[:, 0, 2][:, None] * utils.get_meter_per_pixel(scale=1)
+            pre_v = -T1[:, 1, 2][:, None] * utils.get_meter_per_pixel(scale=1)
+
+        if args.end2end == 1:
+            flow_predictions, flow_conf, mask, pre_u, pre_v, pre_theta = net(sat_map, grd_left_imgs, left_camera_k,
+                                                                             gt_shift_u, gt_shift_v, gt_heading,
+                                                                             end2end=1)
+
+        shifts = torch.cat([pre_v, pre_u], dim=-1)
+        gt_shift = torch.cat([s_gt_v, s_gt_u], dim=-1)
+        pred_shifts.append(shifts.data.cpu().numpy())
+        gt_shifts.append(gt_shift.data.cpu().numpy())
+
+        pred_headings.append(pre_theta.data.cpu().numpy())
+        gt_headings.append(s_gt_heading.data.cpu().numpy())
+
+        # mcc_v = input("v")
+        # mcc_v = float(mcc_v)
+        # mcc_u = input("u")
+        # mcc_u = float(mcc_u)
+
+        # RGB_KITTI_com_pose(sat_map, grd_left_imgs, gt_u=vis_u, gt_v=vis_v, gt_theta = vis_heading,\
+        #     pre_u = -shifts[:,1]/ utils.get_meter_per_pixel(scale=1), pre_v =  shifts[:,0]/ utils.get_meter_per_pixel(scale=1),pre_theta=shifts,\
+        #     com_u = -1/ utils.get_meter_per_pixel(scale=1), com_v = 1/ utils.get_meter_per_pixel(scale=1),come_theta=1,\
+        #     save_dir='./result_visualize/')
+
+        if args.test_flow:
+            coords0 = coords_grid(mask.size()[0], mask.size()[2], mask.size()[3], device=mask.device)
+            coords1 = match(mask, vis_heading, vis_u, vis_v, coords0)  # gt
+            flow_gt = coords1 - coords0
+            flow_gt = flow_gt * mask
+            flow_predictions = flow_predictions
+            loss, metrics = corr_test_loss(flow_predictions, flow_gt, mask.repeat(1, 2, 1, 1), args.gamma)  # loss
+
+        if args.test_flow:
+            j = 0
+            for key in metrics.keys():
+                test_met[j] = test_met[j] + metrics[key]
+                j = j + 1
+
+        if i % 20 == 0:
+            print(i, "/", len(dataloader))
+
+    end_time = time.time()
+    duration = (end_time - start_time) / len(dataloader)
+
+    pred_shifts = np.concatenate(pred_shifts, axis=0)
+    pred_headings = np.concatenate(pred_headings, axis=0)
+    gt_shifts = np.concatenate(gt_shifts, axis=0)
+    gt_headings = np.concatenate(gt_headings, axis=0)
+
+    distance = np.sqrt(np.sum((pred_shifts - gt_shifts) ** 2, axis=1))
+    angle_diff = np.remainder(np.abs(pred_headings - gt_headings), 360)
+    idx0 = angle_diff > 180
+    angle_diff[idx0] = 360 - angle_diff[idx0]
+
+    init_dis = np.sqrt(np.sum(gt_shifts ** 2, axis=1))
+    init_angle = np.abs(gt_headings)
+
+    metrics = [1, 3, 5]
+    angles = [1, 3, 5]
+    if args.test_flow:
+        print('Time per image (second): ' + str(duration))
+        print('epe:{:.3f}'.format(test_met[0] / len(dataloader)))
+        print('5px:{:.3f}'.format(test_met[1] / len(dataloader) * 100))
+        print('15px:{:.3f}'.format(test_met[2] / len(dataloader) * 100))
+        print('25px:{:.3f}'.format(test_met[3] / len(dataloader) * 100))
+        print('50px:{:.3f}'.format(test_met[4] / len(dataloader) * 100))
+
+    if not os.path.exists(save_path):
+        os.makedirs(save_path)
+
+    file_name = save_path + "/Test2_results.txt"
+    f = open(os.path.join(file_name), 'a')
+    f.write('====================================\n')
+    f.write('       EPOCH: ' + str(epoch) + '\n')
+    f.write('Time per image (second): ' + str(duration) + '\n')
+    f.write('Validation results:' + '\n')
+    f.write('Pred distance average: ' + str(np.mean(distance)) + '\n')
+    f.write('Pred distance median: ' + str(np.median(distance)) + '\n')
+    f.write('Pred angle average: ' + str(np.mean(angle_diff)) + '\n')
+    f.write('Pred angle median: ' + str(np.median(angle_diff)) + '\n')
+    print('====================================')
+    print('       EPOCH: ' + str(epoch))
+    print('Time per image (second): ' + str(duration) + '\n')
+    print('Validation results:')
+    print('Init distance average: ', np.mean(init_dis))
+    print('Pred distance average: ', np.mean(distance))
+    print('Pred distance median: ', np.median(distance))
+    print('Init angle average: ', np.mean(init_angle))
+    print('Pred angle average: ', np.mean(angle_diff))
+    print('Pred angle median: ', np.median(angle_diff))
+
+    wandb_features[f'test1/fps'] = duration
+    wandb_features[f'test1/shift_dis'] = np.mean(distance)
+    wandb_features[f'test1/shift_dis_median'] = np.median(distance)
+    wandb_features[f'test1/shift_rot'] = np.mean(angle_diff)
+    wandb_features[f'test1/shift_rot_median'] = np.median(angle_diff)
+
+    for idx in range(len(metrics)):
+        pred = np.sum(distance < metrics[idx]) / distance.shape[0] * 100
+        init = np.sum(init_dis < metrics[idx]) / init_dis.shape[0] * 100
+
+        line = 'distance within ' + str(metrics[idx]) + ' meters (pred, init): ' + str(pred) + ' ' + str(init)
+        print(line)
+        f.write(line + '\n')
+    print('-------------------------')
+    f.write('------------------------\n')
+
+    diff_shifts = np.abs(pred_shifts - gt_shifts)
+    for idx in range(len(metrics)):
+        pred = np.sum(diff_shifts[:, 0] < metrics[idx]) / diff_shifts.shape[0] * 100
+        init = np.sum(np.abs(gt_shifts[:, 0]) < metrics[idx]) / init_dis.shape[0] * 100
+
+        line = 'lateral      within ' + str(metrics[idx]) + ' meters (pred, init): ' + str(pred) + ' ' + str(init)
+        print(line)
+        f.write(line + '\n')
+
+        if idx == 0:
+            wandb_features[f'test1/percent_lat_{metrics[idx]}m'] = pred
+
+        pred = np.sum(diff_shifts[:, 1] < metrics[idx]) / diff_shifts.shape[0] * 100
+        init = np.sum(np.abs(gt_shifts[:, 1]) < metrics[idx]) / diff_shifts.shape[0] * 100
+
+        line = 'longitudinal within ' + str(metrics[idx]) + ' meters (pred, init): ' + str(pred) + ' ' + str(init)
+        print(line)
+        f.write(line + '\n')
+
+        if idx == 0:
+            wandb_features[f'test1/percent_lon_{metrics[idx]}m'] = pred
+
+    print('-------------------------')
+    f.write('------------------------\n')
+    for idx in range(len(angles)):
+        pred = np.sum(angle_diff < angles[idx]) / angle_diff.shape[0] * 100
+        init = np.sum(init_angle < angles[idx]) / angle_diff.shape[0] * 100
+        line = 'angle within ' + str(angles[idx]) + ' degrees (pred, init): ' + str(pred) + ' ' + str(init)
+        print(line)
+        f.write(line + '\n')
+        if idx == 0:
+            wandb_features[f'test1/percent_rot_{metrics[idx]}m'] = pred
+
+    print('-------------------------')
+    f.write('------------------------\n')
+
+    for idx in range(len(angles)):
+        pred = np.sum((angle_diff[:, 0] < angles[idx]) & (diff_shifts[:, 0] < metrics[idx])) / angle_diff.shape[0] * 100
+        init = np.sum((init_angle[:, 0] < angles[idx]) & (np.abs(gt_shifts[:, 0]) < metrics[idx])) / angle_diff.shape[
+            0] * 100
+        line = 'lat within ' + str(metrics[idx]) + ' & angle within ' + str(angles[idx]) + \
+               ' (pred, init): ' + str(pred) + ' ' + str(init)
+        print(line)
+        f.write(line + '\n')
+
+    print('====================================')
+    f.write('====================================\n')
+    f.close()
+    wandb_logger.log_evaluate(wandb_features)
+
+
+def test2(net_test, args, save_path, best_rank_result, epoch, wandb_logger):
+    ### net evaluation state
+    net_test.eval()
+
+    dataloader = load_test2_data(mini_batch, args.shift_range_lat, args.shift_range_lon, args.rotation_range)
+
+    pred_shifts = []
+    pred_headings = []
+
+    gt_shifts = []
+    gt_headings = []
+    wandb_features = dict()
+
+    # RANSAC_E = RANSAC(0.5)
+    # 'epe', '5px', '15px', '25px', '50px'
+    test_met = [0, 0, 0, 0, 0]
+
+    start_time = time.time()
+    # RANSAC_E = RANSAC(0.5)
+    for i, data in enumerate(tqdm(dataloader), 0):
+        sat_map_gt, sat_map, left_camera_k, grd_left_imgs, gt_shift_u, gt_shift_v, gt_heading, gt_depth = [item.cuda()
+                                                                                                           for item
+                                                                                                           in data[:-1]]
+
+        vis_heading = gt_heading * args.rotation_range
+        vis_u = -gt_shift_u * (args.shift_range_lon / utils.get_meter_per_pixel(scale=1))
+        vis_v = -gt_shift_v * (args.shift_range_lat / utils.get_meter_per_pixel(scale=1))
+        s_gt_u = gt_shift_u * args.shift_range_lon
+        s_gt_v = gt_shift_v * args.shift_range_lat
+        s_gt_heading = gt_heading * args.rotation_range
+
+        if args.end2end == 0:
+            flow_predictions, flow_conf, mask = net(sat_map, grd_left_imgs, left_camera_k, gt_shift_u, gt_shift_v,
+                                                    gt_heading, end2end=0)
+            # mask
+            mask = mask.float()
+            mask = F.interpolate(mask, size=(512, 512), mode='bilinear', align_corners=True)
+            mask = mask.bool()
+
+            coords0 = coords_grid(mask.size()[0], mask.size()[2], mask.size()[3], device=mask.device)
+            # coords_gt = match(mask, vis_heading, vis_u, vis_v, coords0)
+
+            # save_img(grd_left_imgs[0], 'result_visualize/grd_ori.jpg')
+            # save_img(sat_map_gt[0], 'result_visualize/sat_ori.jpg')
+            # save_img(sat_map[0], 'result_visualize/sat_noise.jpg')
+            # # grd_solve('result_visualize/sat_ori.jpg', 'result_visualize/grd_ori.jpg', left_camera_k[0:1,:,:].cpu(),'result_visualize/Conf/')
+            # # show_feature_map(flow_conf[-1][0], 'result_visualize/Conf/')
+            # # overly('result_visualize/Conf/BEV.jpg', 'result_visualize/Conf/0.jpg', 'result_visualize/Conf/')
+            # # gt
+            # coords0_gt = coords0[0].permute(1,2,0)
+            # coords1_gt = (coords_gt[0]).permute(1,2,0)
+            # match_x = []
+            # match_y = []
+            # # x = [256, 256+512-vis_u.data.float().cpu()]
+            # # y = [256, 256+vis_v.data.float().cpu()]
+            # # match_x.append(x)
+            # # match_y.append(y)
+            # for h in range(coords0_gt.size()[0]):
+            #     for w in range(coords1_gt.size()[1]):
+            #         if ((h == 270 and w == 340) or \
+            #             (random.randint(0,8000) == 1)) and mask[0,0,h,w]:
+            #             x = [coords0_gt[h][w][0].data.float().cpu(), coords1_gt[h][w][0].data.float().cpu() + coords1_gt.size()[1]]
+            #             y = [coords0_gt[h][w][1].data.float().cpu(), coords1_gt[h][w][1].data.float().cpu()]
+            #             match_x.append(x)
+            #             match_y.append(y)
+            # line_point('result_visualize/sat_ori.jpg', 'result_visualize/sat_noise.jpg', match_x, match_y,None, 'line_gt.jpg')
+
+            coor_points = coords0 + flow_predictions[-1]
+            # mask
+            ptsA = coords0.permute(0, 2, 3, 1)[mask.permute(0, 2, 3, 1).repeat(1, 1, 1, 2)].view(1, -1, 2).detach()
+            ptsB = coor_points.permute(0, 2, 3, 1)[mask.permute(0, 2, 3, 1).repeat(1, 1, 1, 2)].view(1, -1, 2).detach()
+            # ptsB = coords_gt.permute(0,2,3,1)[mask.permute(0,2,3,1).repeat(1,1,1,2)].view(1, -1, 2).detach()
+
+            B, C, H, W = coords0.size()
+            _, _, sat_H, sat_W = sat_map_gt.size()
+            # flow_conf = torch.ones_like(ptsA, device=ptsA.device)
+            ls_weight = Least_Squares_weight(epoch).to(ptsA.device)
+            pre_theta1, pre_u1, pre_v1 = ls_weight(ptsA, ptsB, flow_conf[-1][mask][None, :, None])
+            # pre_theta1, pre_u1, pre_v1 = Least_Squares_weight(ptsA, ptsB, flow_conf[-1][mask][None, :, None])
+            # pre_theta1, pre_u1, pre_v1 = Least_Squares_weight(ptsA, ptsB, flow_conf)
+            edu_matrix = rt2edu_matrix(pre_theta1, pre_u1, pre_v1)
+            R = edu_matrix * torch.tensor([[[1, 1, 0], [1, 1, 0], [0, 0, 1]]], device=mask.device)
+            rol_center = torch.tensor([[[1, 0, -sat_H / 2], [0, 1, -sat_W / 2], [0, 0, 1]]], device=mask.device).repeat(
+                B, 1, 1)
+            T1 = torch.inverse(rol_center) @ torch.inverse(R) @ rol_center @ edu_matrix
+            pre_theta = -pre_theta1 / 3.14 * 180
+            pre_u = T1[:, 0, 2][:, None] * utils.get_meter_per_pixel(scale=1)
+            pre_v = -T1[:, 1, 2][:, None] * utils.get_meter_per_pixel(scale=1)
+
+        if args.end2end == 1:
+            flow_predictions, flow_conf, mask, pre_u, pre_v, pre_theta = net(sat_map, grd_left_imgs, left_camera_k,
+                                                                             gt_shift_u, gt_shift_v, gt_heading,
+                                                                             end2end=1)
+
+        shifts = torch.cat([pre_v, pre_u], dim=-1)
+        gt_shift = torch.cat([s_gt_v, s_gt_u], dim=-1)
+        pred_shifts.append(shifts.data.cpu().numpy())
+        gt_shifts.append(gt_shift.data.cpu().numpy())
+
+        pred_headings.append(pre_theta.data.cpu().numpy())
+        gt_headings.append(s_gt_heading.data.cpu().numpy())
+
+        # mcc_v = input("v")
+        # mcc_v = float(mcc_v)
+        # mcc_u = input("u")
+        # mcc_u = float(mcc_u)
+
+        # RGB_KITTI_com_pose(sat_map, grd_left_imgs, gt_u=vis_u, gt_v=vis_v, gt_theta = vis_heading,\
+        #     pre_u = -shifts[:,1]/ utils.get_meter_per_pixel(scale=1), pre_v =  shifts[:,0]/ utils.get_meter_per_pixel(scale=1),pre_theta=shifts,\
+        #     com_u = -1/ utils.get_meter_per_pixel(scale=1), com_v = 1/ utils.get_meter_per_pixel(scale=1),come_theta=1,\
+        #     save_dir='./result_visualize/')
+
+        if args.test_flow:
+            coords0 = coords_grid(mask.size()[0], mask.size()[2], mask.size()[3], device=mask.device)
+            coords1 = match(mask, vis_heading, vis_u, vis_v, coords0)  # gt
+            flow_gt = coords1 - coords0
+            flow_gt = flow_gt * mask
+            flow_predictions = flow_predictions
+            loss, metrics = corr_test_loss(flow_predictions, flow_gt, mask.repeat(1, 2, 1, 1), args.gamma)  # loss
+
+        if args.test_flow:
+            j = 0
+            for key in metrics.keys():
+                test_met[j] = test_met[j] + metrics[key]
+                j = j + 1
+
+        if i % 20 == 0:
+            print(i, "/", len(dataloader))
+
+    end_time = time.time()
+    duration = (end_time - start_time) / len(dataloader)
+
+    pred_shifts = np.concatenate(pred_shifts, axis=0)
+    pred_headings = np.concatenate(pred_headings, axis=0)
+    gt_shifts = np.concatenate(gt_shifts, axis=0)
+    gt_headings = np.concatenate(gt_headings, axis=0)
+
+    distance = np.sqrt(np.sum((pred_shifts - gt_shifts) ** 2, axis=1))
+    angle_diff = np.remainder(np.abs(pred_headings - gt_headings), 360)
+    idx0 = angle_diff > 180
+    angle_diff[idx0] = 360 - angle_diff[idx0]
+
+    init_dis = np.sqrt(np.sum(gt_shifts ** 2, axis=1))
+    init_angle = np.abs(gt_headings)
+
+    metrics = [1, 3, 5]
+    angles = [1, 3, 5]
+    if args.test_flow:
+        print('Time per image (second): ' + str(duration))
+        print('epe:{:.3f}'.format(test_met[0] / len(dataloader)))
+        print('5px:{:.3f}'.format(test_met[1] / len(dataloader) * 100))
+        print('15px:{:.3f}'.format(test_met[2] / len(dataloader) * 100))
+        print('25px:{:.3f}'.format(test_met[3] / len(dataloader) * 100))
+        print('50px:{:.3f}'.format(test_met[4] / len(dataloader) * 100))
+
+    if not os.path.exists(save_path):
+        os.makedirs(save_path)
+
+    file_name = save_path + "/Test2_results.txt"
+    f = open(os.path.join(file_name), 'a')
+    f.write('====================================\n')
+    f.write('       EPOCH: ' + str(epoch) + '\n')
+    f.write('Time per image (second): ' + str(duration) + '\n')
+    f.write('Validation results:' + '\n')
+    f.write('Pred distance average: ' + str(np.mean(distance)) + '\n')
+    f.write('Pred distance median: ' + str(np.median(distance)) + '\n')
+    f.write('Pred angle average: ' + str(np.mean(angle_diff)) + '\n')
+    f.write('Pred angle median: ' + str(np.median(angle_diff)) + '\n')
+    print('====================================')
+    print('       EPOCH: ' + str(epoch))
+    print('Time per image (second): ' + str(duration) + '\n')
+    print('Validation results:')
+    print('Init distance average: ', np.mean(init_dis))
+    print('Pred distance average: ', np.mean(distance))
+    print('Pred distance median: ', np.median(distance))
+    print('Init angle average: ', np.mean(init_angle))
+    print('Pred angle average: ', np.mean(angle_diff))
+    print('Pred angle median: ', np.median(angle_diff))
+
+    wandb_features[f'test2/fps'] = duration
+    wandb_features[f'test2/shift_dis'] = np.mean(distance)
+    wandb_features[f'test2/shift_dis_median'] = np.median(distance)
+    wandb_features[f'test2/shift_rot'] = np.mean(angle_diff)
+    wandb_features[f'test2/shift_rot_median'] = np.median(angle_diff)
+
+    for idx in range(len(metrics)):
+        pred = np.sum(distance < metrics[idx]) / distance.shape[0] * 100
+        init = np.sum(init_dis < metrics[idx]) / init_dis.shape[0] * 100
+
+        line = 'distance within ' + str(metrics[idx]) + ' meters (pred, init): ' + str(pred) + ' ' + str(init)
+        print(line)
+        f.write(line + '\n')
+    print('-------------------------')
+    f.write('------------------------\n')
+
+    diff_shifts = np.abs(pred_shifts - gt_shifts)
+    for idx in range(len(metrics)):
+        pred = np.sum(diff_shifts[:, 0] < metrics[idx]) / diff_shifts.shape[0] * 100
+        init = np.sum(np.abs(gt_shifts[:, 0]) < metrics[idx]) / init_dis.shape[0] * 100
+
+        line = 'lateral      within ' + str(metrics[idx]) + ' meters (pred, init): ' + str(pred) + ' ' + str(init)
+        print(line)
+        f.write(line + '\n')
+
+        if idx == 0:
+            wandb_features[f'test2/percent_lat_{metrics[idx]}m'] = pred
+
+        pred = np.sum(diff_shifts[:, 1] < metrics[idx]) / diff_shifts.shape[0] * 100
+        init = np.sum(np.abs(gt_shifts[:, 1]) < metrics[idx]) / diff_shifts.shape[0] * 100
+
+        line = 'longitudinal within ' + str(metrics[idx]) + ' meters (pred, init): ' + str(pred) + ' ' + str(init)
+        print(line)
+        f.write(line + '\n')
+
+        if idx == 0:
+            wandb_features[f'test2/percent_lon_{metrics[idx]}m'] = pred
+
+    print('-------------------------')
+    f.write('------------------------\n')
+    for idx in range(len(angles)):
+        pred = np.sum(angle_diff < angles[idx]) / angle_diff.shape[0] * 100
+        init = np.sum(init_angle < angles[idx]) / angle_diff.shape[0] * 100
+        line = 'angle within ' + str(angles[idx]) + ' degrees (pred, init): ' + str(pred) + ' ' + str(init)
+        print(line)
+        f.write(line + '\n')
+        if idx == 0:
+            wandb_features[f'test2/percent_rot_{metrics[idx]}m'] = pred
+
+    print('-------------------------')
+    f.write('------------------------\n')
+
+    for idx in range(len(angles)):
+        pred = np.sum((angle_diff[:, 0] < angles[idx]) & (diff_shifts[:, 0] < metrics[idx])) / angle_diff.shape[0] * 100
+        init = np.sum((init_angle[:, 0] < angles[idx]) & (np.abs(gt_shifts[:, 0]) < metrics[idx])) / angle_diff.shape[
+            0] * 100
+        line = 'lat within ' + str(metrics[idx]) + ' & angle within ' + str(angles[idx]) + \
+               ' (pred, init): ' + str(pred) + ' ' + str(init)
+        print(line)
+        f.write(line + '\n')
+
+    print('====================================')
+    f.write('====================================\n')
+    f.close()
+    wandb_logger.log_evaluate(wandb_features)
 
 
 def train(net, lr, args, save_path, wandb_logger):
@@ -264,8 +761,8 @@ def train(net, lr, args, save_path, wandb_logger):
             #             del  x,y
             # line_point('result_visualize/sat_ori.jpg', 'result_visualize/sat_noise.jpg', match_x, match_y, 'line_net.jpg')
 
-            print(epoch,'    ',Loop,'    ',loss)
-            if Loop%10 == 0:
+            # print(epoch,'    ',Loop,'    ',loss)
+            if Loop%100 == 0:
                 print(epoch,'    ',Loop,'    ',\
                       torch.tensor(loss_vec_10).float().mean(), '    ',scheduler.get_last_lr())
                 f = open(os.path.join(logfile_name), 'a')
@@ -278,6 +775,8 @@ def train(net, lr, args, save_path, wandb_logger):
             wandb_features['train/loss'] = np.round(loss.item(), decimals=4)
             wandb_logger.log_evaluate(wandb_features)
 
+            break
+
         compNum = epoch % 100
         if not os.path.exists(save_path):
             os.makedirs(save_path)
@@ -287,6 +786,10 @@ def train(net, lr, args, save_path, wandb_logger):
                 torch.save(net.state_dict(), os.path.join(save_path, 'model_' + str(compNum) + '.pth'))
         else:
             torch.save(net.state_dict(), os.path.join(save_path, 'model_' + str(compNum) + '.pth'))
+
+        if epoch % 5 == 0 or epoch == args.epochs - 1:
+            test1(net, args, save_path, 0, epoch, wandb_logger)
+            test2(net, args, save_path, 0, epoch, wandb_logger)
 
     print('Finished Training')
 
@@ -300,6 +803,7 @@ def parse_args():
 
     parser.add_argument('--resume', type=int, default=0, help='resume the trained model')
     parser.add_argument('--test', type=int, default=0, help='test with trained model')
+    parser.add_argument('--test_flow', type=int, default=0, help='test with trained model')
     parser.add_argument('--debug', type=int, default=0, help='debug to dump middle processing images')
     parser.add_argument('--end2end', type=bool, default=0)
     
@@ -408,7 +912,8 @@ if __name__ == '__main__':
     if args.dpp:
         net = nn.parallel.DistributedDataParallel(net.cuda(args.local_rank), device_ids = [args.local_rank],find_unused_parameters=True)
     else:
-        net = torch.nn.DataParallel(net.cuda(), device_ids = [0])
+        # net = torch.nn.DataParallel(net.cuda(), device_ids = [0])
+        net = net.cuda()
     ###########################
 
     if args.test:

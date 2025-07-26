@@ -612,7 +612,7 @@ def parse_args():
 
     parser.add_argument('--end2end', type=bool, default=1)
 
-    parser.add_argument('--epochs', type=int, default=30, help='number of training epochs')
+    parser.add_argument('--epochs', type=int, default=25, help='number of training epochs')
 
     parser.add_argument('--stereo', type=int, default=0, help='use left and right ground image')
     parser.add_argument('--sequence', type=int, default=1, help='use n images merge to 1 ground image')
