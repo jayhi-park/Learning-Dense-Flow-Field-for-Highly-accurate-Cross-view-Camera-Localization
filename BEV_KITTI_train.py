@@ -5,7 +5,7 @@ import skimage.io as io
 import torchvision.utils
 import cv2
 # os.environ['CUDA_DEVICE_ORDER'] = 'PCI_BUS_ID'
-os.environ['CUDA_VISIBLE_DEVICES'] = '0'
+# os.environ['CUDA_VISIBLE_DEVICES'] = '0'
 
 import torch
 import torch.nn as nn
@@ -31,7 +31,7 @@ import time
 from op_flow.loss_fun import sequence_loss, fetch_optimizer,corr_test_loss,loss_fun
 from RANSAC_lib.RANSAC import RANSAC
 from utils.wandb_logger import WandbLogger
-
+from tqdm import tqdm
 
 try:
     from torch.cuda.amp import GradScaler
@@ -134,7 +134,7 @@ def train(net, lr, args, save_path, wandb_logger):
 
         print('batch_size:', mini_batch, '\n num of batches:', len(trainloader))
 
-        for Loop, Data in enumerate(trainloader, 0):
+        for Loop, Data in enumerate(tqdm(trainloader, desc=f"Epoch {epoch}", ncols=100), 0):
             # get the inputs
             optimizer.zero_grad()
             if args.dpp:
@@ -303,7 +303,7 @@ def parse_args():
     parser.add_argument('--debug', type=int, default=0, help='debug to dump middle processing images')
     parser.add_argument('--end2end', type=bool, default=0)
     
-    parser.add_argument('--epochs', type=int, default=30, help='number of training epochs')
+    parser.add_argument('--epochs', type=int, default=25, help='number of training epochs')
 
     parser.add_argument('--stereo', type=int, default=0, help='use left and right ground image')
     parser.add_argument('--sequence', type=int, default=1, help='use n images merge to 1 ground image')
