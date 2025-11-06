@@ -4,7 +4,7 @@ import os
 import torchvision.utils
 
 # os.environ['CUDA_DEVICE_ORDER'] = 'PCI_BUS_ID'
-os.environ['CUDA_VISIBLE_DEVICES'] = '7'
+# os.environ['CUDA_VISIBLE_DEVICES'] = '7'
 
 import torch
 import torch.nn as nn
@@ -669,6 +669,8 @@ def parse_args():
     parser.add_argument('--iters', type=int, default=12)
     parser.add_argument('--gamma', type=int, default=0.8)
     parser.add_argument('--clip', type=float, default=1.0)
+
+    parser.add_argument('--checkpoint_model_id', type=int, default=24)
     
     args = parser.parse_args()
 
@@ -703,10 +705,10 @@ if __name__ == '__main__':
 
     if args.test:
         #[16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39]
-        test_model = [23]
+        test_model = [args.checkpoint_model_id]
         for i in test_model:
             print("test"+str(i))
-            net.load_state_dict(torch.load('YOUR PATH'))
+            net.load_state_dict(torch.load(os.path.join(save_path, 'model_' + str(i) + '.pth')), strict = False)
             test1(net, args, save_path, 0., epoch = str(i))
             test2(net, args, save_path, 0., epoch = str(i))
         

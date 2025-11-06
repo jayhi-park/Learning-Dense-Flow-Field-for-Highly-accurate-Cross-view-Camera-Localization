@@ -104,10 +104,11 @@ def coords_grid(batch, ht, wd, device):#[B,2,H, W]
     return coords[None].repeat(batch, 1, 1, 1)
 
 def test1(net_test, args, save_path, best_rank_result, epoch, wandb_logger):
+    end2end = 1
     ### net evaluation state
     net_test.eval()
 
-    dataloader = load_test1_data(mini_batch, args.shift_range_lat, args.shift_range_lon, args.rotation_range)
+    dataloader = load_test1_data(1, args.shift_range_lat, args.shift_range_lon, args.rotation_range)
 
     pred_shifts = []
     pred_headings = []
@@ -134,7 +135,7 @@ def test1(net_test, args, save_path, best_rank_result, epoch, wandb_logger):
         s_gt_v = gt_shift_v * args.shift_range_lat
         s_gt_heading = gt_heading * args.rotation_range
 
-        if args.end2end == 0:
+        if end2end == 0:
             flow_predictions, flow_conf, mask = net(sat_map, grd_left_imgs, left_camera_k, gt_shift_u, gt_shift_v,
                                                     gt_heading, end2end=0)
             # mask
@@ -179,9 +180,9 @@ def test1(net_test, args, save_path, best_rank_result, epoch, wandb_logger):
             B, C, H, W = coords0.size()
             _, _, sat_H, sat_W = sat_map_gt.size()
             # flow_conf = torch.ones_like(ptsA, device=ptsA.device)
-            ls_weight = Least_Squares_weight(epoch).to(ptsA.device)
-            pre_theta1, pre_u1, pre_v1 = ls_weight(ptsA, ptsB, flow_conf[-1][mask][None, :, None])
-            # pre_theta1, pre_u1, pre_v1 = Least_Squares_weight(ptsA, ptsB, flow_conf[-1][mask][None, :, None])
+            # ls_weight = Least_Squares_weight(epoch).to(ptsA.device)
+            # pre_theta1, pre_u1, pre_v1 = ls_weight(ptsA, ptsB, flow_conf[-1][mask][None, :, None])
+            pre_theta1, pre_u1, pre_v1 = Least_Squares_weight(ptsA, ptsB, flow_conf[-1][mask][None, :, None])
             # pre_theta1, pre_u1, pre_v1 = Least_Squares_weight(ptsA, ptsB, flow_conf)
             edu_matrix = rt2edu_matrix(pre_theta1, pre_u1, pre_v1)
             R = edu_matrix * torch.tensor([[[1, 1, 0], [1, 1, 0], [0, 0, 1]]], device=mask.device)
@@ -192,7 +193,7 @@ def test1(net_test, args, save_path, best_rank_result, epoch, wandb_logger):
             pre_u = T1[:, 0, 2][:, None] * utils.get_meter_per_pixel(scale=1)
             pre_v = -T1[:, 1, 2][:, None] * utils.get_meter_per_pixel(scale=1)
 
-        if args.end2end == 1:
+        if end2end == 1:
             flow_predictions, flow_conf, mask, pre_u, pre_v, pre_theta = net(sat_map, grd_left_imgs, left_camera_k,
                                                                              gt_shift_u, gt_shift_v, gt_heading,
                                                                              end2end=1)
@@ -350,10 +351,11 @@ def test1(net_test, args, save_path, best_rank_result, epoch, wandb_logger):
 
 
 def test2(net_test, args, save_path, best_rank_result, epoch, wandb_logger):
+    end2end = 1
     ### net evaluation state
     net_test.eval()
 
-    dataloader = load_test2_data(mini_batch, args.shift_range_lat, args.shift_range_lon, args.rotation_range)
+    dataloader = load_test2_data(1, args.shift_range_lat, args.shift_range_lon, args.rotation_range)
 
     pred_shifts = []
     pred_headings = []
@@ -380,7 +382,7 @@ def test2(net_test, args, save_path, best_rank_result, epoch, wandb_logger):
         s_gt_v = gt_shift_v * args.shift_range_lat
         s_gt_heading = gt_heading * args.rotation_range
 
-        if args.end2end == 0:
+        if end2end == 0:
             flow_predictions, flow_conf, mask = net(sat_map, grd_left_imgs, left_camera_k, gt_shift_u, gt_shift_v,
                                                     gt_heading, end2end=0)
             # mask
@@ -425,9 +427,9 @@ def test2(net_test, args, save_path, best_rank_result, epoch, wandb_logger):
             B, C, H, W = coords0.size()
             _, _, sat_H, sat_W = sat_map_gt.size()
             # flow_conf = torch.ones_like(ptsA, device=ptsA.device)
-            ls_weight = Least_Squares_weight(epoch).to(ptsA.device)
-            pre_theta1, pre_u1, pre_v1 = ls_weight(ptsA, ptsB, flow_conf[-1][mask][None, :, None])
-            # pre_theta1, pre_u1, pre_v1 = Least_Squares_weight(ptsA, ptsB, flow_conf[-1][mask][None, :, None])
+            # ls_weight = Least_Squares_weight(epoch).to(ptsA.device)
+            # pre_theta1, pre_u1, pre_v1 = ls_weight(ptsA, ptsB, flow_conf[-1][mask][None, :, None])
+            pre_theta1, pre_u1, pre_v1 = Least_Squares_weight(ptsA, ptsB, flow_conf[-1][mask][None, :, None])
             # pre_theta1, pre_u1, pre_v1 = Least_Squares_weight(ptsA, ptsB, flow_conf)
             edu_matrix = rt2edu_matrix(pre_theta1, pre_u1, pre_v1)
             R = edu_matrix * torch.tensor([[[1, 1, 0], [1, 1, 0], [0, 0, 1]]], device=mask.device)
@@ -438,7 +440,7 @@ def test2(net_test, args, save_path, best_rank_result, epoch, wandb_logger):
             pre_u = T1[:, 0, 2][:, None] * utils.get_meter_per_pixel(scale=1)
             pre_v = -T1[:, 1, 2][:, None] * utils.get_meter_per_pixel(scale=1)
 
-        if args.end2end == 1:
+        if end2end == 1:
             flow_predictions, flow_conf, mask, pre_u, pre_v, pre_theta = net(sat_map, grd_left_imgs, left_camera_k,
                                                                              gt_shift_u, gt_shift_v, gt_heading,
                                                                              end2end=1)
@@ -775,8 +777,6 @@ def train(net, lr, args, save_path, wandb_logger):
             wandb_features['train/loss'] = np.round(loss.item(), decimals=4)
             wandb_logger.log_evaluate(wandb_features)
 
-            break
-
         compNum = epoch % 100
         if not os.path.exists(save_path):
             os.makedirs(save_path)
@@ -787,7 +787,7 @@ def train(net, lr, args, save_path, wandb_logger):
         else:
             torch.save(net.state_dict(), os.path.join(save_path, 'model_' + str(compNum) + '.pth'))
 
-        if epoch % 5 == 0 or epoch == args.epochs - 1:
+        if epoch == args.resume or epoch % 10 == 0 or epoch == args.epochs - 1:
             test1(net, args, save_path, 0, epoch, wandb_logger)
             test2(net, args, save_path, 0, epoch, wandb_logger)
 
@@ -865,6 +865,7 @@ def parse_args():
     parser.add_argument('--gamma', type=int, default=0.8)
     parser.add_argument('--clip', type=float, default=1.0)
 
+    parser.add_argument('--checkpoint_model_id', type=int, default=24)
     parser.add_argument('--wandb', '-wb', action='store_true', help='Turn on wandb log')
     
     args = parser.parse_args()
@@ -924,6 +925,14 @@ if __name__ == '__main__':
         #     net.load_state_dict(torch.load(os.path.join(save_path, 'model_'+str(i)+'.pth')))
         #     test1(net, args, save_path, 0., epoch = i)
         #     test2(net, args, save_path, 0., epoch = i)
+
+        test_model = [args.checkpoint_model_id]
+        for i in test_model:
+            print("test"+str(i))
+            print("Loaded model weights: ", os.path.join(save_path, 'model_' + str(i) + '.pth'))
+            net.load_state_dict(torch.load(os.path.join(save_path, 'model_' + str(i) + '.pth')), strict = False)
+            test1(net, args, save_path, 0., epoch = str(i), wandb_logger=wandb_logger)
+            test2(net, args, save_path, 0., epoch = str(i), wandb_logger=wandb_logger)
         
         # net.load_state_dict(torch.load(os.path.join(save_path, 'model_25.pth')))
         # test1(net, args, save_path, 0., epoch=25)
